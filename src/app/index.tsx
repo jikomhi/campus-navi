@@ -1,18 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View, Image } from 'react-native';
 import { Accelerometer, Magnetometer } from 'expo-sensors';
 
 export default function App() {
   const [steps, setSteps] = useState(0);
   const [heading, setHeading] = useState(0);
   
-  // 2D 맵 상의 내 캐릭터(점) X, Y 좌표 State
-  const [posX, setPosX] = useState(0);
-  const [posY, setPosY] = useState(0);
+  const [isWalking, setIsWalking] = useState(false);
+  const [showSpeech, setShowSpeech] = useState(false);
 
   const isStepping = useRef(false);
-  // 걸음 감지할 때 최신 각도를 바로 빼오기 위한 Ref (React closure 문제 방지)
-  const currentHeading = useRef(0);
+  const idleTimer = useRef<any>(null); // ⭐ 5초 통합 시한폭탄 타이머
 
   useEffect(() => {
     Accelerometer.setUpdateInterval(100);
@@ -22,21 +20,31 @@ export default function App() {
       const { x, y, z } = data;
       const magnitude = Math.sqrt(x * x + y * y + z * z);
       
+      // 💥 브라더가 걷고 있을 때 (진동 감지)
       if (magnitude > 1.5) {
         if (!isStepping.current) {
           setSteps((prev) => prev + 1);
           isStepping.current = true;
-
-          // ⭐ 대망의 위치 이동 로직 (한 걸음당 15픽셀씩 이동)
-          const stepLength = 15; 
-          // 수학 계산을 위해 각도(Degree)를 라디안(Radian)으로 변환
-          const rad = currentHeading.current * (Math.PI / 180);
-          
-          setPosX((prevX) => prevX + stepLength * Math.sin(rad));
-          setPosY((prevY) => prevY - stepLength * Math.cos(rad));
         }
-      } else if (magnitude < 1.2) {
+        
+        // 걷는 모션 유지, 말풍선은 끄기
+        setIsWalking(true);
+        setShowSpeech(false);
+        
+        // 브라더가 계속 걷고 있으니 기존 5초 타이머는 계속 리셋
+        if (idleTimer.current) clearTimeout(idleTimer.current);
+        
+        // ⭐ 마지막으로 걸은 순간부터 5초 카운트다운 시작!
+        idleTimer.current = setTimeout(() => {
+          setIsWalking(false); // 5초 뒤에야 비로소 서 있는 짤(뒤돌아보는 모션)로 변경!
+          setShowSpeech(true); // 동시에 말풍선 빡!
+        }, 5000);
+        
+      } 
+      // 발을 뗐을 때 (진동 잔잔해짐)
+      else if (magnitude < 1.2) {
         isStepping.current = false;
+        // 여기서는 이미지 상태를 안 건드린다! 즉, 브라더가 멈춰도 캐릭터는 계속 걷는 척함.
       }
     });
 
@@ -44,64 +52,55 @@ export default function App() {
       let { x, y } = data;
       let angle = Math.atan2(y, x) * (180 / Math.PI);
       if (angle < 0) angle += 360;
-      
-      const finalAngle = Math.round(angle);
-      currentHeading.current = finalAngle; // 로직용
-      setHeading(finalAngle);              // 화면 출력용
+      setHeading(Math.round(angle));
     });
 
     return () => {
       accSub.remove();
       magSub.remove();
+      if (idleTimer.current) clearTimeout(idleTimer.current);
     };
   }, []);
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>🗺️ 한성대 PDR 내비게이션 🗺️</Text>
+      <Text style={styles.title}>🧭 한성대 PDR 내비게이션 🧭</Text>
       
       <View style={styles.infoBox}>
-        <Text style={styles.infoText}>걸음: {steps}보 | 각도: {heading}°</Text>
+        <Text style={styles.infoText}>걸음: {steps}보 | 방위각: {heading}°</Text>
       </View>
 
-      {/* 여기가 바로 2D 미니맵 도화지다 */}
-      <View style={styles.mapArea}>
-        {/* 이 빨간 점이 바로 브라더 본인 (나중엔 귀여운 캐릭터로 바꿀 거다) */}
-        <View 
-          style={[
-            styles.character, 
-            { transform: [{ translateX: posX }, { translateY: posY }] }
-          ]} 
+      <View style={styles.characterContainer}>
+        {showSpeech && (
+          <View style={styles.speechBubble}>
+            <Text style={styles.speechText}>"브라더, 안 따라오고 뭐해?"</Text>
+          </View>
+        )}
+        
+        <Image 
+          source={
+            isWalking 
+              ? require('../../assets/images/walk.gif') 
+              : require('../../assets/images/idle.png')
+          } 
+          style={styles.character} 
+          resizeMode="contain"
         />
       </View>
       
-      <Text style={styles.tip}>폰을 눕힌 채로 바라보며 걸어보자!</Text>
+      <Text style={styles.tip}>성큼성큼 걷다가 확 멈춰봐라!</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1e272e' },
+  container: { flex: 1, alignItems: 'center', backgroundColor: '#1e272e', paddingTop: 80 },
   title: { fontSize: 24, fontWeight: 'bold', color: '#ffdd59', marginBottom: 20 },
-  infoBox: { backgroundColor: '#485460', padding: 15, borderRadius: 10, marginBottom: 20 },
+  infoBox: { backgroundColor: '#485460', padding: 15, borderRadius: 10, marginBottom: 40 },
   infoText: { fontSize: 18, fontWeight: 'bold', color: '#fff' },
-  mapArea: { 
-    width: 300, 
-    height: 400, 
-    backgroundColor: '#d2dae2', 
-    borderRadius: 10, 
-    justifyContent: 'center', 
-    alignItems: 'center',
-    overflow: 'hidden', // 맵 밖으로 나가면 안 보이게 가림
-    borderWidth: 3,
-    borderColor: '#808e9b'
-  },
-  character: { 
-    width: 20, 
-    height: 20, 
-    backgroundColor: '#ff4757', 
-    borderRadius: 10, // 동그랗게 만들기
-    position: 'absolute' 
-  },
-  tip: { color: '#0be881', marginTop: 20, fontSize: 16, fontWeight: 'bold' }
+  characterContainer: { height: 300, justifyContent: 'flex-end', alignItems: 'center', position: 'relative' },
+  character: { width: 150, height: 200 },
+  speechBubble: { position: 'absolute', top: 0, backgroundColor: '#f5f6fa', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20, borderBottomRightRadius: 0, zIndex: 10 },
+  speechText: { fontSize: 16, fontWeight: 'bold', color: '#2f3640' },
+  tip: { color: '#0be881', marginTop: 50, fontSize: 16, fontWeight: 'bold' }
 });
