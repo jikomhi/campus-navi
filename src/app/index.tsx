@@ -3,7 +3,10 @@ import { StyleSheet, Text, View, Image, TouchableOpacity } from 'react-native';
 import { Accelerometer, Magnetometer } from 'expo-sensors';
 import { Ionicons } from '@expo/vector-icons';
 
-// ⭐ 1. 랜드마크 이름(landmark) 추가! 유저한테 "여기 보임?" 하고 물어볼 이름들이다.
+// 앱의 핵심 데이터 구조:
+// - '출발지_도착지'를 키로 하여 경로별 좌표를 저장한다.
+// - 각 포인트는 x/y 좌표, 안내 문구, landmark 정보를 함께 가진다.
+// - landmark는 사용자가 "지금 보이는 건가?"를 확인할 수 있는 기준점 역할을 한다.
 const ROUTE_DATA: Record<string, any[]> = {
   '한성대 정문_상상관 1층': [
     { x: 0, y: 0, msg: "출발! 앞으로 직진해 브라더!", landmark: "정문 출입구" },                 
@@ -14,11 +17,16 @@ const ROUTE_DATA: Record<string, any[]> = {
 };
 
 export default function App() {
+  // 화면 상태: HOME, SKIN, START_LOC, END_LOC, NAVI 등으로 흐름 전환
   const [screen, setScreen] = useState('HOME');
   const [startLocation, setStartLocation] = useState<string | null>(null);
   const [endLocation, setEndLocation] = useState<string | null>(null);
   const [characterSkin, setCharacterSkin] = useState('기본 스킨');
 
+  // 네비게이션 상태값:
+  // - steps: 걸음 수
+  // - heading: 현재 방위각
+  // - isWalking: 걸음 중 여부
   const [steps, setSteps] = useState(0);
   const [heading, setHeading] = useState(0);
   const [isWalking, setIsWalking] = useState(false);
@@ -35,8 +43,11 @@ export default function App() {
   const idleTimer = useRef<any>(null);
   const currentHeading = useRef(0); 
 
+  // 현재 선택된 경로를 찾는다.
+  // 예: '한성대 정문_상상관 1층' 키를 기준으로 한 경로 배열을 불러온다.
   const currentRoute = startLocation && endLocation ? ROUTE_DATA[`${startLocation}_${endLocation}`] : null;
 
+  // 네비 화면 진입 시 최초 위치와 첫 안내 메시지를 초기화한다.
   useEffect(() => {
     if (screen === 'NAVI' && currentRoute) {
       setPosX(currentRoute[0].x);
@@ -55,6 +66,10 @@ export default function App() {
     }, duration);
   };
 
+  // PDR(Indoor Pedestrian Dead Reckoning) 기반으로 걸음 감지 로직을 실행한다.
+  // - 가속도계로 걸음 판정
+  // - 자석계로 방향(heading) 계산
+  // - 현재 방향을 기준으로 좌표를 이동시킨다.
   useEffect(() => {
     if (screen !== 'NAVI' || !currentRoute) return; 
 
@@ -65,6 +80,7 @@ export default function App() {
       const { x, y, z } = data;
       const magnitude = Math.sqrt(x * x + y * y + z * z);
       
+      // 가속도 임계치를 넘겼을 때 '한 걸음'으로 판단하고 좌표를 이동시킨다.
       if (magnitude > 1.5) {
         if (!isStepping.current) {
           setSteps((prev) => prev + 1);
@@ -87,6 +103,7 @@ export default function App() {
         }, 5000);
 
       } else if (magnitude < 1.2) {
+        // 움직임이 멈춘 구간에서는 다음 보폭을 위해 stepping 플래그를 초기화한다.
         isStepping.current = false;
       }
     });
@@ -107,7 +124,8 @@ export default function App() {
     };
   }, [screen, currentRoute]);
 
-  // ⭐ 2. 자동 도착 감지 (유저가 걸어서 좌표 반경 10 이내에 들어오면)
+  // 경로 체크포인트 도달 여부를 실시간으로 확인한다.
+  // 현재 위치와 다음 waypoint 간 거리 계산 후, 일정 거리 이내면 해당 안내 문구를 출력하고 다음 목표로 이동한다.
   useEffect(() => {
     if (!currentRoute || targetIndex >= currentRoute.length) return;
 
@@ -126,19 +144,19 @@ export default function App() {
     }
   }, [posX, posY, targetIndex, currentRoute]);
 
+  // 화살표 회전값은 목표 방향과 현재 방향 차이로 계산하여, 사용자가 어디를 향해야 하는지 표시한다.
   const arrowRotation = targetAngle - heading;
 
-  // ⭐ 3. 유저가 눈으로 보고 직접 누르는 [강제 좌표 리셋] 버튼 로직!
+  // 사용자가 직접 특정 landmark를 보고 있다고 판단하면, 현재 좌표를 해당 지점으로 강제 보정한다.
+  // 실내 위치 오차를 보정하는 '수동 체크인' 기능으로 동작한다.
   const manualCheckIn = () => {
     if (!currentRoute || targetIndex >= currentRoute.length) return;
     
     const targetPoint = currentRoute[targetIndex];
     
-    // 유저 위치를 목표 징검다리 좌표로 강제로 잡아끌어버림 (오차 초기화)
     setPosX(targetPoint.x);
     setPosY(targetPoint.y);
     
-    // 이벤트 대사 치고 다음 징검다리로 목표 변경
     triggerSpeech(targetPoint.msg, 5000);
     setTargetIndex((prev) => prev + 1);
   };
@@ -154,7 +172,12 @@ export default function App() {
     setShowSpeech(false);
   };
 
-  // --- 메뉴 화면들 (HOME, SKIN, START_LOC, END_LOC) ---
+  // 메뉴 흐름:
+  // 1) HOME: 메인 진입 화면
+  // 2) SKIN: 캐릭터 스킨 선택
+  // 3) START_LOC: 출발지 선택
+  // 4) END_LOC: 도착지 선택
+  // 5) NAVI: 실제 길안내 화면
   if (screen === 'HOME') {
     return (
       <View style={styles.centerContainer}>
@@ -171,10 +194,11 @@ export default function App() {
     const selectSkin = (skin: string) => { setCharacterSkin(skin); setScreen('HOME'); };
     return (
       <View style={styles.centerContainer}>
-        <Text style={styles.startTitle}>스킨을 골라라 브라더</Text>
-        <TouchableOpacity style={styles.secondaryBtn} onPress={() => selectSkin('기본 스킨')}><Text style={styles.btnText}>🚶‍♂️ 기본 스킨</Text></TouchableOpacity>
-        <TouchableOpacity style={styles.secondaryBtn} onPress={() => selectSkin('해멍이')}><Text style={styles.btnText}>🐶 해멍이</Text></TouchableOpacity>
-        <TouchableOpacity style={styles.secondaryBtn} onPress={() => selectSkin('왕남이')}><Text style={styles.btnText}>👑 왕남이</Text></TouchableOpacity>
+        <Text style={styles.startTitle}>길안내를 도와줄 캐릭터를 골라주세요!</Text>
+        <TouchableOpacity style={styles.secondaryBtn} onPress={() => selectSkin('기본 스킨')}><Text style={styles.btnText}>헬창</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.secondaryBtn} onPress={() => selectSkin('여자 선배')}><Text style={styles.btnText}>여자 선배</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.secondaryBtn} onPress={() => selectSkin('남자 선배')}><Text style={styles.btnText}>남자 선배</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.secondaryBtn} onPress={() => selectSkin('상상부기')}><Text style={styles.btnText}>상상부기</Text></TouchableOpacity>
         <TouchableOpacity style={styles.homeBtn} onPress={() => setScreen('HOME')}><Text style={styles.btnText}>뒤로가기</Text></TouchableOpacity>
       </View>
     );
@@ -203,7 +227,9 @@ export default function App() {
     );
   }
 
-  // --- 내비게이션 뷰 ---
+  // 실제 네비게이션 화면:
+  // - 현재 경로와 목표 waypoint를 기반으로 방향 화살표 및 안내 메시지를 표시한다.
+  // - 사용자 위치/방향/목표 도달 여부를 시각화해 길안내 컨셉을 구현한다.
   return (
     <View style={styles.naviContainer}>
       <TouchableOpacity style={styles.topRightBtn} onPress={goHome}>
@@ -216,7 +242,7 @@ export default function App() {
         <Text style={styles.coordText}>내 좌표: X {Math.round(posX)} / Y {Math.round(posY)}</Text>
       </View>
 
-      {/* ⭐ 대망의 오차 리셋 (수동 체크인) 버튼 */}
+      {/*  오차 리셋 (수동 체크인) 버튼 */}
       {currentRoute && targetIndex < currentRoute.length && (
         <TouchableOpacity style={styles.checkInBtn} onPress={manualCheckIn}>
           <Text style={styles.checkInText}>
@@ -252,9 +278,10 @@ export default function App() {
   );
 }
 
+// --- 스타일 정의 ---
 const styles = StyleSheet.create({
   centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1e272e' },
-  startTitle: { fontSize: 32, fontWeight: 'bold', color: '#ffdd59', marginBottom: 15 },
+  startTitle: { fontSize: 25, fontWeight: 'bold', color: '#ffdd59', marginBottom: 15 },
   startSub: { fontSize: 18, color: '#d2dae2', marginBottom: 30 },
   currentSkinText: { fontSize: 16, color: '#0be881', fontWeight: 'bold', marginBottom: 40 },
   primaryBtn: { backgroundColor: '#485460', paddingVertical: 15, paddingHorizontal: 40, borderRadius: 30, marginBottom: 15, width: '80%', alignItems: 'center' },
