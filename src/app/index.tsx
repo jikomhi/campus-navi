@@ -227,6 +227,29 @@ export default function App() {
     );
   }
 
+  // 스킨 이름과 걷기 상태에 따라 이미지를 딱딱 골라주는 자판기 함수!
+  const getCharacterImage = () => {
+    if (characterSkin === '여자 선배') {
+      return isWalking 
+        ? require('../../assets/images/woman_walk.gif') 
+        : require('../../assets/images/woman_idle.png');
+    } else if (characterSkin === '남자 선배') {
+      return isWalking 
+        ? require('../../assets/images/man_walk.gif') 
+        : require('../../assets/images/man_idle.png');
+    } else if (characterSkin === '상상부기') {
+      return isWalking 
+        ? require('../../assets/images/sangsangbugi_walk.gif') 
+        : require('../../assets/images/sangsangbugi_idle.png');
+    } else {
+      // 기본 스킨
+      return isWalking 
+        ? require('../../assets/images/walk.gif') 
+        : require('../../assets/images/idle.png');
+    }
+  };
+
+
   // 실제 네비게이션 화면:
   // - 현재 경로와 목표 waypoint를 기반으로 방향 화살표 및 안내 메시지를 표시한다.
   // - 사용자 위치/방향/목표 도달 여부를 시각화해 길안내 컨셉을 구현한다.
@@ -269,7 +292,8 @@ export default function App() {
         )}
         
         <Image 
-          source={isWalking ? require('../../assets/images/walk.gif') : require('../../assets/images/idle.png')} 
+          // ⭐ 기존 하드코딩된 경로 대신, 방금 만든 함수를 냅다 꽂아버림!
+          source={getCharacterImage()} 
           style={styles.character} 
           resizeMode="contain"
         />
