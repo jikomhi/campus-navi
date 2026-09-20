@@ -2,31 +2,42 @@ import React, { useState, useEffect, useRef } from 'react';
 import { StyleSheet, Text, View, Image, TouchableOpacity } from 'react-native';
 import { Accelerometer, Magnetometer } from 'expo-sensors';
 import { Ionicons } from '@expo/vector-icons';
+import * as Location from 'expo-location';
 
-// 앱의 핵심 데이터 구조:
-// - '출발지_도착지'를 키로 하여 경로별 좌표를 저장한다.
-// - 각 포인트는 x/y 좌표, 안내 문구, landmark 정보를 함께 가진다.
-// - landmark는 사용자가 "지금 보이는 건가?"를 확인할 수 있는 기준점 역할을 한다.
+// ⭐ [퓨전 맵 데이터] X, Y 모눈종이 폐기! 무조건 진짜 위도/경도로 통일한다.
+// 실내(PDR) 포인트도 정문 위도/경도에서 조금 더해진 실제 좌표를 쓴다.
 const ROUTE_DATA: Record<string, any[]> = {
-  '한성대 정문_상상관 1층': [
-    { x: 0, y: 0, msg: "출발! 앞으로 직진해 브라더!", landmark: "정문 출입구" },                 
-    { x: 0, y: 50, msg: "여기서 오른쪽 코너로 돌아!", landmark: "오르막길 꺾이는 코너" },                 
-    { x: 50, y: 50, msg: "오케이, 이제 앞쪽 계단 조심해서 타!", landmark: "상상관 앞 거북이 동상" },      
-    { x: 50, y: 100, msg: "도착했다 브라더! 고생했어.", landmark: "상상관 1층 회전교차로" }                
+  '한성대입구역_상상관 1층': [
+    { type: 'GPS', lat: 37.58284, lng: 127.01058, msg: "정문 통과! 오르막길로!", landmark: "한성대 정문" },
+    { type: 'GPS', lat: 37.58310, lng: 127.01100, msg: "상상관 도착! 이제 실내다.", landmark: "상상관 입구" },
+    // 상상관 안쪽 엘리베이터 (위도/경도로 아주 미세하게 이동한 찐 좌표)
+    { type: 'PDR', lat: 37.58320, lng: 127.01110, msg: "엘베 타고 3층으로 가라", landmark: "엘리베이터" },
   ]
 };
 
+// 위도/경도로 거리(미터) 구하는 수학 공식
+const getDistanceInMeters = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+  const R = 6371e3; 
+  const p1 = lat1 * Math.PI/180;
+  const p2 = lat2 * Math.PI/180;
+  const dp = (lat2-lat1) * Math.PI/180;
+  const dl = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(dp/2) * Math.sin(dp/2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl/2) * Math.sin(dl/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c; 
+};
+
+// ⭐ 1걸음(약 0.7m)을 위도/경도 각도로 환산하는 상수 (서울 한성대 기준)
+const METERS_PER_LAT = 111320; // 위도 1도의 미터 거리
+const METERS_PER_LNG = 88200;  // 경도 1도의 미터 거리 (서울 위치 기준)
+const STEP_LENGTH = 0.7;       // 상남자의 보폭 0.7미터
+
 export default function App() {
-  // 화면 상태: HOME, SKIN, START_LOC, END_LOC, NAVI 등으로 흐름 전환
   const [screen, setScreen] = useState('HOME');
   const [startLocation, setStartLocation] = useState<string | null>(null);
   const [endLocation, setEndLocation] = useState<string | null>(null);
   const [characterSkin, setCharacterSkin] = useState('기본 스킨');
 
-  // 네비게이션 상태값:
-  // - steps: 걸음 수
-  // - heading: 현재 방위각
-  // - isWalking: 걸음 중 여부
   const [steps, setSteps] = useState(0);
   const [heading, setHeading] = useState(0);
   const [isWalking, setIsWalking] = useState(false);
@@ -34,25 +45,69 @@ export default function App() {
   const [showSpeech, setShowSpeech] = useState(false);
   const [speechText, setSpeechText] = useState("브라더, 길 잃었어?");
 
-  const [posX, setPosX] = useState(0);
-  const [posY, setPosY] = useState(0);
   const [targetIndex, setTargetIndex] = useState(1);
   const [targetAngle, setTargetAngle] = useState(0);
 
+  // ⭐ [퓨전 엔진 심장부] posX, posY 폐기! '내 진짜 융합 좌표' 딱 하나만 쓴다.
+  const [myLoc, setMyLoc] = useState<{ lat: number, lng: number } | null>(null);
+  
+  const [currentMode, setCurrentMode] = useState<'GPS' | 'PDR'>('GPS');
+  
+  // 실시간 값들을 타이머/콜백 안에서도 안전하게 쓰기 위한 useRef
+  const currentModeRef = useRef<'GPS' | 'PDR'>('GPS');
   const isStepping = useRef(false);
   const idleTimer = useRef<any>(null);
   const currentHeading = useRef(0); 
+  const locationSub = useRef<Location.LocationSubscription | null>(null);
 
-  // 현재 선택된 경로를 찾는다.
-  // 예: '한성대 정문_상상관 1층' 키를 기준으로 한 경로 배열을 불러온다.
   const currentRoute = startLocation && endLocation ? ROUTE_DATA[`${startLocation}_${endLocation}`] : null;
 
-  // 네비 화면 진입 시 최초 위치와 첫 안내 메시지를 초기화한다.
+  // 모드 변경 시 ref도 같이 업데이트
+  useEffect(() => {
+    currentModeRef.current = currentMode;
+  }, [currentMode]);
+
+  // ⭐ 1. 백그라운드 GPS + 상보 필터(센서 퓨전) 스위치
+  useEffect(() => {
+    (async () => {
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+
+      locationSub.current = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 2000, distanceInterval: 1 },
+        (loc) => { 
+          const gpsLat = loc.coords.latitude;
+          const gpsLng = loc.coords.longitude;
+          
+          setMyLoc((prev) => {
+            if (!prev) return { lat: gpsLat, lng: gpsLng }; // 처음엔 GPS 무조건 수용
+            
+            // 💥 [핵심] 센서 퓨전 로직 💥
+            if (currentModeRef.current === 'GPS') {
+              // 야외: 내 걸음(PDR) 80% + GPS 신호 20% 스무스하게 섞기!
+              const FUSION_RATE = 0.2; 
+              return {
+                lat: prev.lat * (1 - FUSION_RATE) + gpsLat * FUSION_RATE,
+                lng: prev.lng * (1 - FUSION_RATE) + gpsLng * FUSION_RATE
+              };
+            } else {
+              // 실내: GPS 신호 개무시! (오직 브라더 발소리에만 의존)
+              return prev;
+            }
+          });
+        }
+      );
+    })();
+    return () => { if (locationSub.current) locationSub.current.remove(); };
+  }, []);
+
+  // 네비 초기화
   useEffect(() => {
     if (screen === 'NAVI' && currentRoute) {
-      setPosX(currentRoute[0].x);
-      setPosY(currentRoute[0].y);
       setTargetIndex(1);
+      setCurrentMode(currentRoute[0].type); 
+      // 시작 좌표는 첫번째 징검다리로 강제 세팅
+      setMyLoc({ lat: currentRoute[0].lat, lng: currentRoute[0].lng });
       triggerSpeech(currentRoute[0].msg, 4000); 
     }
   }, [screen]);
@@ -61,15 +116,10 @@ export default function App() {
     setSpeechText(msg);
     setShowSpeech(true);
     if (idleTimer.current) clearTimeout(idleTimer.current);
-    idleTimer.current = setTimeout(() => {
-      setShowSpeech(false);
-    }, duration);
+    idleTimer.current = setTimeout(() => { setShowSpeech(false); }, duration);
   };
 
-  // PDR(Indoor Pedestrian Dead Reckoning) 기반으로 걸음 감지 로직을 실행한다.
-  // - 가속도계로 걸음 판정
-  // - 자석계로 방향(heading) 계산
-  // - 현재 방향을 기준으로 좌표를 이동시킨다.
+  // ⭐ 2. PDR(가속도계) -> 1걸음을 위도/경도로 변환해서 밀고 나감!
   useEffect(() => {
     if (screen !== 'NAVI' || !currentRoute) return; 
 
@@ -77,20 +127,27 @@ export default function App() {
     Magnetometer.setUpdateInterval(100);
 
     const accSub = Accelerometer.addListener((data: any) => {
-      const { x, y, z } = data;
-      const magnitude = Math.sqrt(x * x + y * y + z * z);
+      const magnitude = Math.sqrt(data.x**2 + data.y**2 + data.z**2);
       
-      // 가속도 임계치를 넘겼을 때 '한 걸음'으로 판단하고 좌표를 이동시킨다.
       if (magnitude > 1.5) {
         if (!isStepping.current) {
           setSteps((prev) => prev + 1);
           isStepping.current = true;
 
-          const stepLength = 5; 
-          const rad = currentHeading.current * (Math.PI / 180);
-          
-          setPosX((prevX) => prevX + stepLength * Math.sin(rad));
-          setPosY((prevY) => prevY + stepLength * Math.cos(rad));
+          // 💥 [핵심] 걸음을 위도/경도로 바꾸는 삼각함수 마법
+          setMyLoc((prev) => {
+            if (!prev) return prev;
+            const rad = currentHeading.current * (Math.PI / 180);
+            
+            // 북쪽(0도)일때 lat 증가, 동쪽(90도)일때 lng 증가
+            const deltaLat = (STEP_LENGTH * Math.cos(rad)) / METERS_PER_LAT;
+            const deltaLng = (STEP_LENGTH * Math.sin(rad)) / METERS_PER_LNG;
+            
+            return {
+              lat: prev.lat + deltaLat,
+              lng: prev.lng + deltaLng
+            };
+          });
         }
         
         setIsWalking(true);
@@ -101,9 +158,7 @@ export default function App() {
           setIsWalking(false); 
           triggerSpeech("브라더, 안 따라오고 뭐해?", 4000);
         }, 5000);
-
       } else if (magnitude < 1.2) {
-        // 움직임이 멈춘 구간에서는 다음 보폭을 위해 stepping 플래그를 초기화한다.
         isStepping.current = false;
       }
     });
@@ -117,48 +172,57 @@ export default function App() {
       currentHeading.current = finalAngle;
     });
 
-    return () => {
-      accSub.remove();
-      magSub.remove();
-      if (idleTimer.current) clearTimeout(idleTimer.current);
-    };
+    return () => { accSub.remove(); magSub.remove(); };
   }, [screen, currentRoute]);
 
-  // 경로 체크포인트 도달 여부를 실시간으로 확인한다.
-  // 현재 위치와 다음 waypoint 간 거리 계산 후, 일정 거리 이내면 해당 안내 문구를 출력하고 다음 목표로 이동한다.
+  // ⭐ 3. 통일된 목표 도착 판별 (전부 미터(m) 단위로 계산)
   useEffect(() => {
-    if (!currentRoute || targetIndex >= currentRoute.length) return;
+    if (!currentRoute || targetIndex >= currentRoute.length || !myLoc) return;
 
     const targetPoint = currentRoute[targetIndex];
-    const dist = Math.sqrt(Math.pow(targetPoint.x - posX, 2) + Math.pow(targetPoint.y - posY, 2));
+    
+    // 야외(GPS)든 실내(PDR)든 내 위도/경도와 목적지 위도/경도 사이의 진짜 거리(m)를 잰다!
+    const dist = getDistanceInMeters(myLoc.lat, myLoc.lng, targetPoint.lat, targetPoint.lng);
 
+    // 10미터 이내로 들어오면 도착 인정!
     if (dist < 10) {
       triggerSpeech(targetPoint.msg, 5000); 
-      setTargetIndex((prev) => prev + 1);   
+      const nextIndex = targetIndex + 1;
+      setTargetIndex(nextIndex);   
+      
+      if (nextIndex < currentRoute.length) {
+        const nextTarget = currentRoute[nextIndex];
+        if (currentMode === 'GPS' && nextTarget.type === 'PDR') {
+          triggerSpeech("실내 진입! 지금부터 발소리로 길 찾는다.", 5000);
+        }
+        setCurrentMode(nextTarget.type);
+      }
     } else {
-      const dx = targetPoint.x - posX;
-      const dy = targetPoint.y - posY;
+      // 화살표 방향 실시간 갱신 (목적지 위도/경도 기반 방위각 계산)
+      const dy = targetPoint.lat - myLoc.lat;
+      const dx = targetPoint.lng - myLoc.lng;
       let mathAngle = Math.atan2(dy, dx) * (180 / Math.PI);
       let compassAngle = (90 - mathAngle + 360) % 360;
       setTargetAngle(Math.round(compassAngle));
     }
-  }, [posX, posY, targetIndex, currentRoute]);
+  }, [myLoc, targetIndex, currentMode, currentRoute]);
 
-  // 화살표 회전값은 목표 방향과 현재 방향 차이로 계산하여, 사용자가 어디를 향해야 하는지 표시한다.
   const arrowRotation = targetAngle - heading;
 
-  // 사용자가 직접 특정 landmark를 보고 있다고 판단하면, 현재 좌표를 해당 지점으로 강제 보정한다.
-  // 실내 위치 오차를 보정하는 '수동 체크인' 기능으로 동작한다.
+  // ⭐ 4. 수동 체크인 (내 위치를 목표 위도/경도로 확 잡아끌기!)
   const manualCheckIn = () => {
     if (!currentRoute || targetIndex >= currentRoute.length) return;
-    
     const targetPoint = currentRoute[targetIndex];
     
-    setPosX(targetPoint.x);
-    setPosY(targetPoint.y);
+    // 야외든 실내든 유저가 눈으로 봤다고 하면 좌표 오차 0으로 강제 보정!
+    setMyLoc({ lat: targetPoint.lat, lng: targetPoint.lng });
     
     triggerSpeech(targetPoint.msg, 5000);
-    setTargetIndex((prev) => prev + 1);
+    const nextIndex = targetIndex + 1;
+    setTargetIndex(nextIndex);
+    if (nextIndex < currentRoute.length) {
+      setCurrentMode(currentRoute[nextIndex].type);
+    }
   };
 
   const goHome = () => {
@@ -166,18 +230,12 @@ export default function App() {
     setStartLocation(null);
     setEndLocation(null);
     setSteps(0);
-    setPosX(0);
-    setPosY(0);
+    setMyLoc(null);
     setIsWalking(false);
     setShowSpeech(false);
   };
 
-  // 메뉴 흐름:
-  // 1) HOME: 메인 진입 화면
-  // 2) SKIN: 캐릭터 스킨 선택
-  // 3) START_LOC: 출발지 선택
-  // 4) END_LOC: 도착지 선택
-  // 5) NAVI: 실제 길안내 화면
+  // --- 메뉴 화면들 (UI 완벽 보존) ---
   if (screen === 'HOME') {
     return (
       <View style={styles.centerContainer}>
@@ -209,7 +267,7 @@ export default function App() {
     return (
       <View style={styles.centerContainer}>
         <Text style={styles.startTitle}>어디서 출발할까?</Text>
-        <TouchableOpacity style={styles.primaryBtn} onPress={() => pickStart('한성대 정문')}><Text style={styles.btnText}>📍 한성대 정문</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.primaryBtn} onPress={() => pickStart('한성대입구역')}><Text style={styles.btnText}>📍 한성대입구역</Text></TouchableOpacity>
         <TouchableOpacity style={styles.homeBtn} onPress={() => setScreen('HOME')}><Text style={styles.btnText}>취소</Text></TouchableOpacity>
       </View>
     );
@@ -227,32 +285,14 @@ export default function App() {
     );
   }
 
-  // 스킨 이름과 걷기 상태에 따라 이미지를 딱딱 골라주는 자판기 함수!
   const getCharacterImage = () => {
-    if (characterSkin === '여자 선배') {
-      return isWalking 
-        ? require('../../assets/images/woman_walk.gif') 
-        : require('../../assets/images/woman_idle.png');
-    } else if (characterSkin === '남자 선배') {
-      return isWalking 
-        ? require('../../assets/images/man_walk.gif') 
-        : require('../../assets/images/man_idle.png');
-    } else if (characterSkin === '상상부기') {
-      return isWalking 
-        ? require('../../assets/images/sangsangbugi_walk.gif') 
-        : require('../../assets/images/sangsangbugi_idle.png');
-    } else {
-      // 기본 스킨
-      return isWalking 
-        ? require('../../assets/images/walk.gif') 
-        : require('../../assets/images/idle.png');
-    }
+    if (characterSkin === '여자 선배') return isWalking ? require('../../assets/images/woman_walk.gif') : require('../../assets/images/woman_idle.png');
+    else if (characterSkin === '남자 선배') return isWalking ? require('../../assets/images/man_walk.gif') : require('../../assets/images/man_idle.png');
+    else if (characterSkin === '상상부기') return isWalking ? require('../../assets/images/sangsangbugi_walk.gif') : require('../../assets/images/sangsangbugi_idle.png');
+    else return isWalking ? require('../../assets/images/walk.gif') : require('../../assets/images/idle.png');
   };
 
-
-  // 실제 네비게이션 화면:
-  // - 현재 경로와 목표 waypoint를 기반으로 방향 화살표 및 안내 메시지를 표시한다.
-  // - 사용자 위치/방향/목표 도달 여부를 시각화해 길안내 컨셉을 구현한다.
+  // --- 내비게이션 뷰 ---
   return (
     <View style={styles.naviContainer}>
       <TouchableOpacity style={styles.topRightBtn} onPress={goHome}>
@@ -261,11 +301,10 @@ export default function App() {
       <Text style={styles.title}>🧭 PDR 내비게이션 🧭</Text>
       
       <View style={styles.infoBox}>
-        <Text style={styles.routeText}>{startLocation} ➡️ {endLocation}</Text> 
-        <Text style={styles.coordText}>내 좌표: X {Math.round(posX)} / Y {Math.round(posY)}</Text>
+        <Text style={styles.routeText}>{currentMode === 'GPS' ? '☀️ 야외 (GPS + PDR 퓨전 중)' : '🏢 실내 (PDR 100% 작동 중)'}</Text> 
+        <Text style={styles.coordText}>내 좌표: {myLoc ? `${myLoc.lat.toFixed(5)}, ${myLoc.lng.toFixed(5)}` : '잡는 중...'}</Text>
       </View>
 
-      {/*  오차 리셋 (수동 체크인) 버튼 */}
       {currentRoute && targetIndex < currentRoute.length && (
         <TouchableOpacity style={styles.checkInBtn} onPress={manualCheckIn}>
           <Text style={styles.checkInText}>
@@ -291,18 +330,13 @@ export default function App() {
           </View>
         )}
         
-        <Image 
-          // ⭐ 기존 하드코딩된 경로 대신, 방금 만든 함수를 냅다 꽂아버림!
-          source={getCharacterImage()} 
-          style={styles.character} 
-          resizeMode="contain"
-        />
+        <Image source={getCharacterImage()} style={styles.character} resizeMode="contain" />
       </View>
     </View>
   );
 }
 
-// --- 스타일 정의 ---
+// --- 브라더가 깎아둔 스타일 완벽 보존 ---
 const styles = StyleSheet.create({
   centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1e272e' },
   startTitle: { fontSize: 25, fontWeight: 'bold', color: '#ffdd59', marginBottom: 15 },
@@ -320,7 +354,6 @@ const styles = StyleSheet.create({
   routeText: { fontSize: 16, color: '#0be881', fontWeight: 'bold', marginBottom: 5 },
   coordText: { fontSize: 14, color: '#d2dae2', fontWeight: 'bold' },
   
-  // ⭐ 수동 체크인 버튼 디자인
   checkInBtn: { backgroundColor: '#e1b12c', paddingVertical: 15, paddingHorizontal: 20, borderRadius: 10, marginBottom: 15, width: '90%', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 3, elevation: 5 },
   checkInText: { fontSize: 16, fontWeight: 'bold', color: '#2f3640' },
   
@@ -328,9 +361,9 @@ const styles = StyleSheet.create({
   successText: { fontSize: 18, fontWeight: 'bold', color: '#fff' },
   
   characterContainer: { height: 350, justifyContent: 'flex-end', alignItems: 'center', position: 'relative' },
- arrowContainer: { 
+  arrowContainer: { 
     position: 'absolute', 
-    bottom: -80, // 발밑으로 배치 
+    bottom: -80, 
     zIndex: 20, 
     shadowColor: "#0fbcf9", 
     shadowOffset: { width: 0, height: 0 }, 
@@ -339,13 +372,11 @@ const styles = StyleSheet.create({
     elevation: 10 
   },
   
-  // 캐릭터 크기
   character: { width: 150, height: 200 },
   
-  // ⭐ 말풍선은 캐릭터 머리 위쪽으로 시원하게 더 끌어올림!
   speechBubble: { 
     position: 'absolute', 
-    top: 10, // 겹치지 않게 더 위로 올림
+    top: 10, 
     backgroundColor: '#f5f6fa', 
     paddingHorizontal: 20, 
     paddingVertical: 10, 
