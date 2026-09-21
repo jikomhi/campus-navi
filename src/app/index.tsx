@@ -4,15 +4,52 @@ import { Accelerometer, Magnetometer } from 'expo-sensors';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 
-// ⭐ [퓨전 맵 데이터] X, Y 모눈종이 폐기! 무조건 진짜 위도/경도로 통일한다.
-// 실내(PDR) 포인트도 정문 위도/경도에서 조금 더해진 실제 좌표를 쓴다.
+// 🧱 1. [랜드마크 DB] 캠퍼스의 모든 주요 지점 좌표를 여기 한 곳에만 딱 저장해둔다. (레고 블록들)
+const LANDMARK_DB: Record<string, any> = {
+  '정문': { type: 'GPS', lat: 37.58284, lng: 127.01058, landmark: "한성대 정문" },
+  '미래관_삼거리': { type: 'GPS', lat: 37.58300, lng: 127.01080, landmark: "미래관 앞 삼거리" },
+  '상상관_입구': { type: 'GPS', lat: 37.58310, lng: 127.01100, landmark: "상상관 1층 출입구" },
+  '상상관_엘베': { type: 'PDR', lat: 37.58320, lng: 127.01110, landmark: "상상관 1층 엘리베이터" },
+  '상상관_3층과방': { type: 'PDR', lat: 37.58325, lng: 127.01115, landmark: "상상관 3층 과방" }
+};
+
+// 🗺️ 2. [경로 데이터] 위에서 만든 블록(DB)들을 쏙쏙 뽑아와서 조립만 한다!
 const ROUTE_DATA: Record<string, any[]> = {
+  
+  // 루트 A: 정문에서 상상관 올라갈 때
   '한성대입구역_상상관 1층': [
-    { type: 'GPS', lat: 37.58284, lng: 127.01058, msg: "정문 통과! 오르막길로!", landmark: "한성대 정문" },
-    { type: 'GPS', lat: 37.58310, lng: 127.01100, msg: "상상관 도착! 이제 실내다.", landmark: "상상관 입구" },
-    // 상상관 안쪽 엘리베이터 (위도/경도로 아주 미세하게 이동한 찐 좌표)
-    { type: 'PDR', lat: 37.58320, lng: 127.01110, msg: "엘베 타고 3층으로 가라", landmark: "엘리베이터" },
+    // ...LANDMARK_DB['이름'] 이렇게 쓰면 좌표랑 랜드마크 이름을 그대로 훔쳐온다!
+    // 그리고 msg(대사)만 상황에 맞게 덮어씌워주는 거다.
+    { ...LANDMARK_DB['정문'], msg: "정문 통과! 오르막길로 빡세게 올라가자!" },
+    { ...LANDMARK_DB['미래관_삼거리'], msg: "우측 상상관 쪽으로 꺾어!" },
+    { ...LANDMARK_DB['상상관_입구'], msg: "상상관 도착! 이제 실내다." },
+    { ...LANDMARK_DB['상상관_엘베'], msg: "엘베 타고 3층으로 가라 브라더" },
+    { ...LANDMARK_DB['상상관_3층과방'], msg: "도착했다! 고생했어." }
+  ],
+
+  // 루트 B: 반대로 상상관에서 정문으로 집에 갈 때 (재활용의 미학 💥)
+  '상상관 1층_한성대입구역': [
+    { ...LANDMARK_DB['상상관_입구'], msg: "상상관 밖으로 나왔다! 집에 가자." },
+    { ...LANDMARK_DB['미래관_삼거리'], msg: "삼거리 통과, 내리막 조심해라!" },
+    { ...LANDMARK_DB['정문'], msg: "정문 도착! 지하철 타러 가자." }
   ]
+};
+
+// 💬 [캐릭터별 잔소리 DB] 5초 동안 안 걸으면 발사되는 대사들
+const IDLE_MESSAGES: Record<string, string> = {
+  '헬창': "브라더! 하체 안 할 거야? 세트 쉬는 시간 끝났다 뛰어와!",
+  '여자 선배': "후배님~ 얼른 안 오고 거기서 뭐해?",
+  '남자 선배': "야, 엎드려뻗치기 전에 빨리 안 뛰어오냐?",
+  '상상부기': "부기부기! 거북이보다 느리면 어떡하냐북!",
+  '기본 스킨': "브라더, 안 따라오고 뭐해?"
+};
+
+// 🏁 [최종 도착지별 엔딩 대사 DB] 도착하면 무조건 이 대사를 날린다!
+const FINAL_MESSAGES: Record<string, string> = {
+  '상상관 1층': "상상관 도착! 여긴 내가 젤 좋아하는 공간이야. 커피 한잔 어때?",
+  '상상관 3층': "3층 도착 완료! 여기서 보는 캠퍼스 뷰가 꽤 괜찮지.",
+  '미래관 식당': "크~ 드디어 식당! 오늘 학식 메뉴는 제육이려나?",
+  '한성대입구역': "하교 완료! 오늘도 고생 많았다 브라더. 푹 쉬어라!"
 };
 
 // 위도/경도로 거리(미터) 구하는 수학 공식
@@ -37,6 +74,12 @@ export default function App() {
   const [startLocation, setStartLocation] = useState<string | null>(null);
   const [endLocation, setEndLocation] = useState<string | null>(null);
   const [characterSkin, setCharacterSkin] = useState('기본 스킨');
+
+  // ⭐ [추가] 타이머가 최신 스킨 이름을 까먹지 않게 계속 비춰주는 거울
+  const skinRef = useRef(characterSkin);
+  useEffect(() => {
+    skinRef.current = characterSkin;
+  }, [characterSkin]);
 
   const [steps, setSteps] = useState(0);
   const [heading, setHeading] = useState(0);
@@ -156,7 +199,9 @@ export default function App() {
         if (idleTimer.current) clearTimeout(idleTimer.current);
         idleTimer.current = setTimeout(() => {
           setIsWalking(false); 
-          triggerSpeech("브라더, 안 따라오고 뭐해?", 4000);
+          // ⭐ DB에서 현재 스킨에 맞는 잔소리를 쏙 빼와서 쏜다!
+          const idleMsg = IDLE_MESSAGES[skinRef.current] || IDLE_MESSAGES['기본 스킨'];
+          triggerSpeech(idleMsg, 4000);
         }, 5000);
       } else if (magnitude < 1.2) {
         isStepping.current = false;
@@ -186,16 +231,21 @@ export default function App() {
 
     // 10미터 이내로 들어오면 도착 인정!
     if (dist < 10) {
-      triggerSpeech(targetPoint.msg, 5000); 
       const nextIndex = targetIndex + 1;
       setTargetIndex(nextIndex);   
       
       if (nextIndex < currentRoute.length) {
+        // 🏃‍♂️ [아직 가는 중] 다음 징검다리가 남았을 때
+        triggerSpeech(targetPoint.msg, 5000); 
         const nextTarget = currentRoute[nextIndex];
         if (currentMode === 'GPS' && nextTarget.type === 'PDR') {
           triggerSpeech("실내 진입! 지금부터 발소리로 길 찾는다.", 5000);
         }
         setCurrentMode(nextTarget.type);
+      } else {
+        // 🏁 [최종 목적지 도착!] 
+        const finalMsg = FINAL_MESSAGES[endLocation || ''] || "목적지 도착! 고생했다 브라더!";
+        triggerSpeech(finalMsg, 8000); // 여운을 위해 말풍선을 8초 동안 길게 띄워줌!
       }
     } else {
       // 화살표 방향 실시간 갱신 (목적지 위도/경도 기반 방위각 계산)
@@ -209,19 +259,25 @@ export default function App() {
 
   const arrowRotation = targetAngle - heading;
 
-  // ⭐ 4. 수동 체크인 (내 위치를 목표 위도/경도로 확 잡아끌기!)
+// ⭐ 4. 수동 체크인 (내 위치를 목표 위도/경도로 확 잡아끌기!)
   const manualCheckIn = () => {
     if (!currentRoute || targetIndex >= currentRoute.length) return;
     const targetPoint = currentRoute[targetIndex];
     
-    // 야외든 실내든 유저가 눈으로 봤다고 하면 좌표 오차 0으로 강제 보정!
+    // 유저가 눈으로 봤다고 하면 좌표 오차 0으로 강제 보정!
     setMyLoc({ lat: targetPoint.lat, lng: targetPoint.lng });
     
-    triggerSpeech(targetPoint.msg, 5000);
     const nextIndex = targetIndex + 1;
     setTargetIndex(nextIndex);
+    
     if (nextIndex < currentRoute.length) {
+      // 🏃‍♂️ [아직 가는 중]
+      triggerSpeech(targetPoint.msg, 5000);
       setCurrentMode(currentRoute[nextIndex].type);
+    } else {
+      // 🏁 [최종 목적지 도착!]
+      const finalMsg = FINAL_MESSAGES[endLocation || ''] || "목적지 도착! 고생했다 브라더!";
+      triggerSpeech(finalMsg, 8000); // 8초 유지
     }
   };
 
