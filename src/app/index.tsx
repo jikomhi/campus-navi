@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { StyleSheet, Text, View, Image, TouchableOpacity, Platform, Linking, ActivityIndicator } from 'react-native';
+import { StyleSheet, Text, View, Image, TouchableOpacity, Platform, Linking, ActivityIndicator, ScrollView } from 'react-native';
 import { Accelerometer, Magnetometer } from 'expo-sensors';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
@@ -54,8 +54,8 @@ const MONO = Platform.select({ ios: 'Courier', android: 'monospace', default: 'm
 // 🖼️ 캐릭터 에셋 (프리로드 대상)
 // ============================================================
 const SKINS: Record<string, { label: string; sub: string; idle: any; walk: any }> = {
-  '기본 스킨': {
-    label: '헬창', sub: '하체 얘기밖에 안 함',
+  '헬창': {
+    label: '헬창', sub: '뇌까지 근육인가 싶음',
     idle: require('../../assets/images/idle.png'), walk: require('../../assets/images/walk.gif'),
   },
   '여자 선배': {
@@ -63,10 +63,10 @@ const SKINS: Record<string, { label: string; sub: string; idle: any; walk: any }
     idle: require('../../assets/images/woman_idle.png'), walk: require('../../assets/images/woman_walk.gif'),
   },
   '남자 선배': {
-    label: '남자 선배', sub: '군기 잡는 타입',
+    label: '남자 선배', sub: '자상하고 친절함',
     idle: require('../../assets/images/man_idle.png'), walk: require('../../assets/images/man_walk.gif'),
   },
-  '상상부기': {
+  '기본 스킨': {
     label: '상상부기', sub: '느릿느릿 학교 마스코트',
     idle: require('../../assets/images/sangsangbugi_idle.png'), walk: require('../../assets/images/sangsangbugi_walk.gif'),
   },
@@ -378,7 +378,7 @@ export default function App() {
       }
       setCurrentMode(next.type);
     } else {
-      const finalMsg = FINAL_MESSAGES[reached.id] || '목적지 도착! 고생했다 브라더!';
+      const finalMsg = FINAL_MESSAGES[reached.id] || '목적지 도착! 고생했어!';
       triggerSpeech(finalMsg, 8000, 'success');
       AsyncStorage.removeItem(STORE_SESSION).catch(() => {});
       setSavedSession(null);
@@ -476,11 +476,11 @@ export default function App() {
         <Ruled />
         <View style={styles.sheetInner}>
           <Text style={styles.kicker}>위치 권한 필요</Text>
-          <Text style={styles.sheetTitle}>네 위치를 모르면{'\n'}데려다 줄 수가 없다</Text>
+          <Text style={styles.sheetTitle}>네 위치를 모르면{'\n'}데려다 줄 수가 없어</Text>
           <View style={styles.markerBar} />
           <Text style={styles.homeNote}>
-            설정에서 위치 권한을 켜고 다시 들어와라.{'\n'}
-            권한 없이는 화살표가 아무 데도 못 가리킨다.
+            설정에서 위치 권한을 켜고 다시 들어와.{'\n'}
+            권한 없이는 화살표가 아무 데도 못 가리켜.
           </Text>
           <View style={{ flex: 1 }} />
           <TouchableOpacity style={styles.pressBtn} onPress={() => Linking.openSettings()} activeOpacity={0.85}>
@@ -505,11 +505,11 @@ export default function App() {
           <Text style={styles.wordmark}>길잡이</Text>
           <Text style={styles.wordmarkBig}>선배</Text>
           <View style={styles.markerBar} />
-          <Text style={styles.homeNote}>헤매지 마라. 앞장서서 데려다 줄 테니{'\n'}뒤만 따라 붙어라.</Text>
+          <Text style={styles.homeNote}>처음이라 어렵지?{'\n'}헤메지마 선배가 안내해줄게.</Text>
 
           {!pdrAvailable && (
             <View style={styles.warnBox}>
-              <Text style={styles.warnText}>이 기기는 걸음 센서가 없다. GPS로만 안내하고, 실내에선 직접 체크인해라.</Text>
+              <Text style={styles.warnText}>이 기기는 걸음 센서가 없어. GPS로만 안내하고, 실내에선 직접 체크인해줘.</Text>
             </View>
           )}
 
@@ -585,9 +585,9 @@ export default function App() {
         <Ruled />
         <View style={styles.sheetInner}>
           <Text style={styles.kicker}>보폭 맞추기</Text>
-          <Text style={styles.sheetTitle}>키가{'\n'}몇이냐?</Text>
+          <Text style={styles.sheetTitle}>키가{'\n'}몇이야?</Text>
           <View style={styles.markerBar} />
-          <Text style={styles.homeNote}>보폭을 알아야 실내에서 네 위치를 제대로 센다.{'\n'}대충 골라도 걸으면서 알아서 보정된다.</Text>
+          <Text style={styles.homeNote}>보폭을 알아야 실내에서 네 위치를 제대로 셀 수 있어.{'\n'}대충 골라도 걸으면서 알아서 보정해줄게.</Text>
 
           <View style={styles.chipWrap}>
             {HEIGHTS.map(h => (
@@ -628,16 +628,22 @@ export default function App() {
           <Text style={styles.kicker}>1단계 / 2단계</Text>
           <Text style={styles.sheetTitle}>지금{'\n'}어디냐?</Text>
           <View style={styles.markerBar} />
-          {SELECTABLE_PLACES.map((p, i) => (
-            <PickRow
-              key={p.id}
-              no={String(i + 1).padStart(2, '0')}
-              label={p.shortName || p.name}
-              sub={p.sub}
-              onPress={() => { setStartId(p.id); setScreen('END_LOC'); }}
-            />
-          ))}
-          <TouchableOpacity style={styles.backLink} onPress={() => setScreen('HOME')} activeOpacity={0.6}>
+          
+          {/* ⭐ 스크롤바 장착! flex: 1을 줘서 남는 공간을 쫙 빨아들임 */}
+          <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+            {SELECTABLE_PLACES.map((p, i) => (
+              <PickRow
+                key={p.id}
+                no={String(i + 1).padStart(2, '0')}
+                label={p.shortName || p.name}
+                sub={p.sub}
+                onPress={() => { setStartId(p.id); setScreen('END_LOC'); }}
+              />
+            ))}
+          </ScrollView>
+
+          {/* 취소 버튼은 스크롤 밖에 둬서 바닥에 고정! */}
+          <TouchableOpacity style={[styles.backLink, { marginTop: 16 }]} onPress={() => setScreen('HOME')} activeOpacity={0.6}>
             <Ionicons name="close" size={16} color={C.redPen} />
             <Text style={styles.backLinkText}>취소</Text>
           </TouchableOpacity>
@@ -658,17 +664,22 @@ export default function App() {
             <Text style={styles.fromTagLabel}>출발</Text>
             <Text style={styles.fromTagValue}>{LANDMARK_DB[startId || '']?.shortName}</Text>
           </View>
-          {SELECTABLE_PLACES.map((p, i) => (
-            <PickRow
-              key={p.id}
-              no={String(i + 1).padStart(2, '0')}
-              label={p.shortName || p.name}
-              sub={p.id === startId ? '여긴 지금 네가 서 있는 데다' : p.sub}
-              disabled={p.id === startId}
-              onPress={() => beginNavi(startId!, p.id)}
-            />
-          ))}
-          <TouchableOpacity style={styles.backLink} onPress={() => setScreen('START_LOC')} activeOpacity={0.6}>
+          
+          {/* ⭐ 여기도 스크롤바 장착 */}
+          <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+            {SELECTABLE_PLACES.map((p, i) => (
+              <PickRow
+                key={p.id}
+                no={String(i + 1).padStart(2, '0')}
+                label={p.shortName || p.name}
+                sub={p.id === startId ? '여긴 지금 네가 서 있는 데다' : p.sub}
+                disabled={p.id === startId}
+                onPress={() => beginNavi(startId!, p.id)}
+              />
+            ))}
+          </ScrollView>
+
+          <TouchableOpacity style={[styles.backLink, { marginTop: 16 }]} onPress={() => setScreen('START_LOC')} activeOpacity={0.6}>
             <Ionicons name="arrow-back" size={16} color={C.redPen} />
             <Text style={styles.backLinkText}>이전으로</Text>
           </TouchableOpacity>
@@ -712,7 +723,7 @@ export default function App() {
 
       {gpsStale && (
         <View style={styles.staleBar}>
-          <Text style={styles.staleText}>GPS 신호가 안 잡힌다. 하늘 보이는 데로 나오거나 직접 체크인해라.</Text>
+          <Text style={styles.staleText}>GPS 신호가 안 잡히고있어. 하늘 보이는 데로 나오거나 직접 체크인해줘.</Text>
         </View>
       )}
 
