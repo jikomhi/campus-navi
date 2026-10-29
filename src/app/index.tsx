@@ -11,9 +11,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   LANDMARK_DB, SELECTABLE_PLACES, buildRoute, getDistanceInMeters,
   getRemainingDistance, IDLE_MESSAGES, OFF_ROUTE_MESSAGES,
-  INDOOR_ENTER_MESSAGE, OUTDOOR_ENTER_MESSAGE, FINAL_MESSAGES,
+  INDOOR_ENTER_MESSAGE, OUTDOOR_ENTER_MESSAGE, arriveRadiusAt,
   RoutePoint, PointType,
-} from './mapData';
+} from '@/data/mapData';
+import { Dir, DIR_ANGLE, DIR_LABEL, nextDir } from '@/utils/direction';
 
 // ============================================================
 // ⚙️ 튜닝 상수 (현장에서 만질 값들)
@@ -25,7 +26,10 @@ const DEFAULT_STEP_LENGTH = 0.7;
 const STEP_LENGTH_MIN = 0.45;
 const STEP_LENGTH_MAX = 0.95;
 
-const HEADING_ALPHA = 0.15;      // 방위 저역통과 계수 (낮을수록 부드럽고 느림)
+const HEADING_ALPHA = 0.3;       // 방위 저역통과 계수 (OS가 이미 보정해줘서 가볍게만)
+const COURSE_MIN_MOVE = 5;       // GPS 진행방향을 믿으려면 최소 이만큼(m) 움직여야 함 (GPS 떨림 무시)
+const COURSE_MAX_ACC = 15;       // GPS 정확도가 이보다 나쁘면 진행방향 계산 안 함
+const COURSE_HOLD_MS = 3000;     // GPS 진행방향 잡은 뒤 이 시간 동안은 나침반이 못 덮어씀
 const ARRIVE_RADIUS = 10;        // 도착 인정 반경(m)
 const OFF_ROUTE_STREAK = 3;      // 몇 번 연속 멀어지면 경고
 const OFF_ROUTE_MARGIN = 2;      // 이만큼(m) 이상 멀어져야 '멀어짐'으로 침
@@ -53,7 +57,10 @@ const MONO = Platform.select({ ios: 'Courier', android: 'monospace', default: 'm
 // ============================================================
 // 🖼️ 캐릭터 에셋 (프리로드 대상)
 // ============================================================
-const SKINS: Record<string, { label: string; sub: string; idle: any; walk: any }> = {
+// dirs: 방향별 전용 그림 (뽑아오면 여기 꽂기). 없으면 기본 그림을 기울여서 대신함.
+// 예) dirs: { left: { idle: require('...left_idle.png'), walk: require('...left_walk.gif') } }
+type Pose = { idle: any; walk: any };
+const SKINS: Record<string, Pose & { label: string; sub: string; dirs?: Partial<Record<Dir, Pose>> }> = {
   '헬창': {
     label: '헬창', sub: '뇌까지 근육인가 싶음',
     idle: require('../../assets/images/idle.png'), walk: require('../../assets/images/walk.gif'),
@@ -71,7 +78,16 @@ const SKINS: Record<string, { label: string; sub: string; idle: any; walk: any }
     idle: require('../../assets/images/sangsangbugi_idle.png'), walk: require('../../assets/images/sangsangbugi_walk.gif'),
   },
 };
-const ALL_ASSETS = Object.values(SKINS).flatMap(s => [s.idle, s.walk]);
+const ALL_ASSETS = Object.values(SKINS).flatMap(s =>
+  [s, ...Object.values(s.dirs ?? {})].flatMap(p => [p.idle, p.walk]));
+
+// 방향별 그림이 없을 때 임시 연출: 가야 할 쪽으로 비켜서며 몸을 기울임
+const DIR_FALLBACK_STYLE: Record<Dir, any> = {
+  front: {},
+  left: { transform: [{ translateX: -30 }, { rotate: '-7deg' }] },
+  right: { transform: [{ translateX: 30 }, { rotate: '7deg' }] },
+  back: { transform: [{ scaleX: -1 }] },
+};
 
 // ============================================================
 // 🧮 유틸
@@ -139,6 +155,10 @@ export default function App() {
   const currentModeRef = useRef<PointType>('GPS');
   const isStepping = useRef(false);
   const idleTimer = useRef<any>(null);
+  const speechTimer = useRef<any>(null);
+  const walkingRef = useRef(false);
+  const courseAnchor = useRef<{ lat: number; lng: number } | null>(null);
+  const lastCourseAt = useRef(0);
   const currentHeading = useRef(0);
   const locationSub = useRef<Location.LocationSubscription | null>(null);
   const lastGpsAt = useRef<number>(0);
@@ -151,6 +171,7 @@ export default function App() {
   useEffect(() => { stepLengthRef.current = stepLength; }, [stepLength]);
   useEffect(() => { voiceRef.current = voiceOn; }, [voiceOn]);
   useEffect(() => { currentModeRef.current = currentMode; }, [currentMode]);
+  useEffect(() => { walkingRef.current = isWalking; }, [isWalking]);
 
   // ============================================================
   // 🗣️ 대사 출력 (+ TTS + 햅틱)
@@ -158,8 +179,8 @@ export default function App() {
   const triggerSpeech = useCallback((msg: string, duration: number, haptic?: 'light' | 'success' | 'warn') => {
     setSpeechText(msg);
     setShowSpeech(true);
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    idleTimer.current = setTimeout(() => setShowSpeech(false), duration);
+    if (speechTimer.current) clearTimeout(speechTimer.current);
+    speechTimer.current = setTimeout(() => setShowSpeech(false), duration);
 
     if (voiceRef.current) {
       Speech.stop();
@@ -197,7 +218,7 @@ export default function App() {
       setPdrAvailable(!!accOk);
       setCompassAvailable(!!magOk);
 
-      setScreen('HOME');
+      setScreen(s => (s === 'DENIED' ? s : 'HOME')); // 권한 거부 화면을 덮어쓰지 않게
     })();
   }, []);
 
@@ -232,10 +253,24 @@ export default function App() {
           setGpsAccuracy(acc);
           setGpsStale(false);
 
+          // 💥 야외에서 걷는 중이면 GPS 원본 궤적으로 진행방향을 잡는다 (나침반보다 자기장에 강함)
+          const anchor = courseAnchor.current;
+          if (!anchor || currentModeRef.current !== 'GPS' || !walkingRef.current || (acc != null && acc > COURSE_MAX_ACC)) {
+            courseAnchor.current = { lat: gpsLat, lng: gpsLng };
+          } else if (getDistanceInMeters(anchor.lat, anchor.lng, gpsLat, gpsLng) >= COURSE_MIN_MOVE) {
+            const dy = (gpsLat - anchor.lat) * METERS_PER_LAT;
+            const dx = (gpsLng - anchor.lng) * METERS_PER_LNG;
+            const course = (90 - Math.atan2(dy, dx) * (180 / Math.PI) + 360) % 360;
+            currentHeading.current = course;
+            setHeading(Math.round(course));
+            lastCourseAt.current = Date.now();
+            courseAnchor.current = { lat: gpsLat, lng: gpsLng };
+          }
+
           setMyLoc((prev) => {
             if (!prev) return { lat: gpsLat, lng: gpsLng };
             if (currentModeRef.current === 'GPS') {
-              const rate = fusionRateFor(acc); // 💥 신호 품질에 따라 가변
+              const rate = fusionRateFor(acc); 
               return {
                 lat: prev.lat * (1 - rate) + gpsLat * rate,
                 lng: prev.lng * (1 - rate) + gpsLng * rate,
@@ -310,7 +345,6 @@ export default function App() {
           }
 
           setIsWalking(true);
-          setShowSpeech(false);
           if (idleTimer.current) clearTimeout(idleTimer.current);
           idleTimer.current = setTimeout(() => {
             setIsWalking(false);
@@ -322,20 +356,19 @@ export default function App() {
       }));
     }
 
+    let cancelled = false;
     if (compassAvailable) {
-      Magnetometer.setUpdateInterval(100);
-      subs.push(Magnetometer.addListener((data: any) => {
-        const { x, y } = data;
-        let angle = Math.atan2(y, x) * (180 / Math.PI);
-        if (angle < 0) angle += 360;
-        // 💥 저역통과 필터: 실내 철골에서 값이 튀어도 화살표가 안 떤다
+      // 💥 센서 원본 대신 OS가 자이로·기울기까지 보정한 방위를 받는다
+      Location.watchHeadingAsync((h) => {
+        if (walkingRef.current && Date.now() - lastCourseAt.current < COURSE_HOLD_MS) return; // GPS 진행방향 우선
+        const angle = h.trueHeading >= 0 ? h.trueHeading : h.magHeading;
         const smoothed = smoothAngle(currentHeading.current, angle, HEADING_ALPHA);
         currentHeading.current = smoothed;
         setHeading(Math.round(smoothed));
-      }));
+      }).then((sub) => { if (cancelled) sub.remove(); else subs.push(sub); }).catch(() => setCompassAvailable(false));
     }
 
-    return () => subs.forEach(s => s.remove());
+    return () => { cancelled = true; subs.forEach(s => s.remove()); };
   }, [screen, route, pdrAvailable, compassAvailable, triggerSpeech]);
 
   // ============================================================
@@ -378,8 +411,7 @@ export default function App() {
       }
       setCurrentMode(next.type);
     } else {
-      const finalMsg = FINAL_MESSAGES[reached.id] || '목적지 도착! 고생했어!';
-      triggerSpeech(finalMsg, 8000, 'success');
+      triggerSpeech(reached.msg, 8000, 'success'); // buildRoute가 건물 기준 도착 대사를 넣어둠
       AsyncStorage.removeItem(STORE_SESSION).catch(() => {});
       setSavedSession(null);
     }
@@ -396,14 +428,14 @@ export default function App() {
     setLegDistance(dist);
     setRemaining(getRemainingDistance(route, targetIndex, myLoc.lat, myLoc.lng));
 
-    if (dist < ARRIVE_RADIUS) {
+    if (dist < arriveRadiusAt(route, targetIndex, ARRIVE_RADIUS)) {
       advanceTo(targetIndex + 1, target, false);
       return;
     }
 
-    // 방위각 갱신
-    const dy = target.lat - myLoc.lat;
-    const dx = target.lng - myLoc.lng;
+    // 방위각 갱신 (경도 1°는 위도 1°보다 짧으니 미터로 환산해서 계산)
+    const dy = (target.lat - myLoc.lat) * METERS_PER_LAT;
+    const dx = (target.lng - myLoc.lng) * METERS_PER_LNG;
     const mathAngle = Math.atan2(dy, dx) * (180 / Math.PI);
     setTargetAngle(Math.round((90 - mathAngle + 360) % 360));
 
@@ -436,6 +468,8 @@ export default function App() {
   };
 
   const arrowRotation = targetAngle - heading;
+  const [dir, setDir] = useState<Dir>('front');
+  useEffect(() => { setDir(d => nextDir(d, arrowRotation)); }, [arrowRotation]);
 
   // ============================================================
   // 🧩 공통 조각
@@ -626,7 +660,7 @@ export default function App() {
         <Ruled />
         <View style={styles.sheetInner}>
           <Text style={styles.kicker}>1단계 / 2단계</Text>
-          <Text style={styles.sheetTitle}>지금{'\n'}어디냐?</Text>
+          <Text style={styles.sheetTitle}>지금{'\n'}어디야?</Text>
           <View style={styles.markerBar} />
           
           {/* ⭐ 스크롤바 장착! flex: 1을 줘서 남는 공간을 쫙 빨아들임 */}
@@ -672,7 +706,7 @@ export default function App() {
                 key={p.id}
                 no={String(i + 1).padStart(2, '0')}
                 label={p.shortName || p.name}
-                sub={p.id === startId ? '여긴 지금 네가 서 있는 데다' : p.sub}
+                sub={p.id === startId ? '여긴 지금 네가 서 있는 데야' : p.sub}
                 disabled={p.id === startId}
                 onPress={() => beginNavi(startId!, p.id)}
               />
@@ -692,7 +726,9 @@ export default function App() {
   // 내비게이션 뷰
   // ============================================================
   const skin = SKINS[characterSkin] || SKINS['기본 스킨'];
-  const charImage = isWalking ? skin.walk : skin.idle;
+  const pose = skin.dirs?.[dir] ?? skin;
+  const charImage = isWalking ? pose.walk : pose.idle;
+  const charStyle = skin.dirs?.[dir] ? null : DIR_FALLBACK_STYLE[dir];
   const total = route ? route.length : 0;
   const done = Math.min(targetIndex, total);
   const arrived = !!route && targetIndex >= route.length;
@@ -780,17 +816,19 @@ export default function App() {
           </View>
         )}
 
-        <Image source={charImage} style={styles.character} resizeMode="contain" />
+        <Image source={charImage} style={[styles.character, !arrived && charStyle]} resizeMode="contain" />
 
         <View style={styles.compass}>
           {compassAvailable ? (
-            <View style={[styles.compassNeedle, { transform: [{ rotate: `${arrowRotation}deg` }] }]}>
-              <Ionicons name="navigate" size={34} color={C.redPen} />
+            // 정밀 바늘 대신 4방향으로 끊어서 → 센서가 좀 흔들려도 안 떤다
+            <View style={[styles.compassNeedle, { transform: [{ rotate: `${DIR_ANGLE[dir]}deg` }] }]}>
+              <Ionicons name="arrow-up" size={36} color={C.redPen} />
             </View>
           ) : (
             <Ionicons name="help" size={28} color={C.inkSoft} />
           )}
         </View>
+        {compassAvailable && !arrived && <Text style={styles.dirLabel}>{DIR_LABEL[dir]}</Text>}
       </View>
 
       <View style={styles.meterBar}>
@@ -950,6 +988,7 @@ const styles = StyleSheet.create({
     backgroundColor: C.paperDeep, alignItems: 'center', justifyContent: 'center', marginTop: -18, zIndex: 20,
   },
   compassNeedle: { alignItems: 'center', justifyContent: 'center' },
+  dirLabel: { marginTop: 6, fontSize: 14, fontWeight: '900', color: C.redPen, letterSpacing: 1 },
 
   meterBar: { flexDirection: 'row', alignItems: 'center', borderTopWidth: 2, borderTopColor: C.ink, backgroundColor: C.paperDeep, paddingVertical: 12, paddingHorizontal: 16, paddingBottom: 26 },
   meterCell: { flex: 1 },
